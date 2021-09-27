@@ -1,3 +1,4 @@
+import bs58 from 'bs58';
 import {
   AUCTION_ID,
   METADATA_PROGRAM_ID,
@@ -5,6 +6,7 @@ import {
   StringPublicKey,
   toPublicKey,
   VAULT_ID,
+  TOKEN_PROGRAM_ID,
 } from '../../utils/ids';
 import { MAX_WHITELISTED_CREATOR_SIZE } from '../../models';
 import {
@@ -18,6 +20,7 @@ import {
   METADATA_PREFIX,
   decodeMetadata,
   getAuctionExtended,
+  MetadataKey,
 } from '../../actions';
 import { AccountInfo, Connection, PublicKey } from '@solana/web3.js';
 import {
@@ -34,6 +37,8 @@ import { processVaultData } from './processVaultData';
 import { ParsedAccount } from '../accounts/types';
 import { getEmptyMetaState } from './getEmptyMetaState';
 import { getMultipleAccounts } from '../accounts/getMultipleAccounts';
+import { deserializeAccount } from '..';
+import { programIds } from '../..';
 
 export const USE_SPEED_RUN = false;
 const WHITELISTED_METADATA = ['98vYFjBYS9TguUMWQRPjy2SZuxKuUMcqR4vnQiLjZbte'];
@@ -321,6 +326,60 @@ export const limitedLoadAccounts = async (connection: Connection) => {
   return tempCache;
 };
 
+const findMany = async (
+  connection: Connection,
+  filters: {
+    mint?: StringPublicKey | PublicKey;
+    updateAuthority?: StringPublicKey | PublicKey;
+  } = {},
+) => {
+  return await getProgramAccounts(connection, programIds().metadata, {
+    filters: [
+      // Filter for MetadataV1 by key
+      {
+        memcmp: {
+          offset: 0,
+          bytes: bs58.encode(Buffer.from([MetadataKey.MetadataV1])),
+        },
+      },
+      // Filter for assigned to update authority
+      filters.updateAuthority && {
+        memcmp: {
+          offset: 1,
+          bytes: new PublicKey(filters.updateAuthority).toBase58(),
+        },
+      },
+      // Filter for assigned to mint
+      filters.mint && {
+        memcmp: {
+          offset: 33,
+          bytes: new PublicKey(filters.mint).toBase58(),
+        },
+      },
+    ].filter(Boolean),
+  });
+};
+
+const getMetdataByOwnerV2 = async (
+  connection: Connection,
+  owner: StringPublicKey | PublicKey,
+) => {
+  const accounts = await connection.getTokenAccountsByOwner(
+    new PublicKey(owner),
+    {
+      programId: TOKEN_PROGRAM_ID,
+    },
+  );
+  const accountsWithAmount = accounts.value
+    .map(({ account }) => deserializeAccount(account.data))
+    .filter(({ amount }) => amount?.toNumber() > 0);
+  return (
+    await Promise.all(
+      accountsWithAmount.map(({ mint }) => findMany(connection, { mint })),
+    )
+  ).flat();
+};
+
 export const loadAccounts = async (connection: Connection, all: boolean) => {
   const tempCache: MetaState = getEmptyMetaState();
   const updateTemp = makeSetter(tempCache);
@@ -336,33 +395,71 @@ export const loadAccounts = async (connection: Connection, all: boolean) => {
     await forEach(processMetaplexAccounts)(creators);
   };
 
-  const basePromises = [
-    getProgramAccounts(connection, VAULT_ID).then(forEach(processVaultData)),
-    getProgramAccounts(connection, AUCTION_ID).then(forEach(processAuctions)),
-    getProgramAccounts(connection, METAPLEX_ID).then(
-      forEach(processMetaplexAccounts),
-    ),
-    getProgramAccounts(connection, METAPLEX_ID, {
-      filters: [
-        {
-          dataSize: MAX_WHITELISTED_CREATOR_SIZE,
-        },
-      ],
-    }).then(pullMetadata),
-  ];
-  await Promise.all(basePromises);
+  console.log('getMetdataByOwnerV2');
+  console.time();
+  const meta = await getMetdataByOwnerV2(
+    connection,
+    'Phaw77ye2y1wTX3pWZPx4mThe94ykgmu5UNzjM143zS',
+  );
+  console.log(meta);
+  console.timeEnd();
+
+  console.log('VAULT_ID');
+  console.time();
+  // const basePromises = [
+  await getProgramAccounts(connection, VAULT_ID).then(
+    forEach(processVaultData),
+  );
+  console.timeEnd();
+
+  console.log('AUCTION_ID');
+  console.time();
+  await getProgramAccounts(connection, AUCTION_ID).then(
+    forEach(processAuctions),
+  );
+  console.timeEnd();
+
+  console.log('METAPLEX_ID');
+  console.time();
+  await getProgramAccounts(connection, METAPLEX_ID).then(
+    forEach(processMetaplexAccounts),
+  ); // auction manager -> auctions by auction manager
+  console.timeEnd();
+
+  console.log('METAPLEX_ID MAX_WHITELISTED_CREATOR_SIZE');
+  console.time();
+  await getProgramAccounts(connection, METAPLEX_ID, {
+    filters: [
+      {
+        dataSize: MAX_WHITELISTED_CREATOR_SIZE,
+      },
+    ],
+  }).then(pullMetadata);
+  // ];
+  // await Promise.all(basePromises);
+  console.timeEnd();
+
   const additionalPromises: Promise<void>[] = getAdditionalPromises(
     connection,
     tempCache,
     forEach,
   );
 
+  console.log('additionalPromises');
+  console.time();
   await Promise.all(additionalPromises);
+  console.timeEnd();
 
+  console.log('postProcessMetadata');
+  console.time();
   await postProcessMetadata(tempCache, all);
   console.log('Metadata size', tempCache.metadata.length);
+  console.timeEnd();
 
+  console.log('pullEditions');
+  console.time();
   await pullEditions(connection, updateTemp, tempCache, all);
+  console.timeEnd();
 
   return tempCache;
 };

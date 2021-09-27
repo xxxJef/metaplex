@@ -52,7 +52,7 @@ export const processMetaplexAccounts: ProcessAccountsFunc = async (
         };
         setter(
           'auctionManagersByAuction',
-          auctionManager.auction,
+          auctionManager.auction, // get auction by this id
           parsedAccount,
         );
       }
